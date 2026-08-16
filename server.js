@@ -4,37 +4,35 @@ const cors = require('cors');
 const { ApifyClient } = require('apify-client');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('ffmpeg-static');
+const ffprobePath = require('ffprobe-static').path;
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 const axios = require('axios');
 
-// Link fluent-ffmpeg to the automatically downloaded ffmpeg-static binary
+// Link FFmpeg & FFprobe to downloaded binaries
 ffmpeg.setFfmpegPath(ffmpegPath);
+ffmpeg.setFfprobePath(ffprobePath);
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Security: Unrestricted CORS to prevent ANY blocking on Blogger
+// Security: Unrestricted CORS
 app.use(cors());
 app.use(express.json());
 
-// Setup a safe temporary directory for Muxed Files
+// Setup a safe temporary directory
 const TEMP_DIR = path.join(os.tmpdir(), 'numu_downloads');
 if (!fs.existsSync(TEMP_DIR)) {
     fs.mkdirSync(TEMP_DIR);
 }
 
-// Clean up processed files to save server space (1 Hour Delay)
+// Clean up files after 1 hour
 const deleteFileAfterDelay = (filePath, delay = 60 * 60 * 1000) => {
     setTimeout(() => {
         if (fs.existsSync(filePath)) {
-            try {
-                fs.unlinkSync(filePath);
-            } catch (e) {
-                console.error(`Failed to delete file: ${filePath}`, e);
-            }
+            try { fs.unlinkSync(filePath); } catch (e) { }
         }
     }, delay);
 };
@@ -49,7 +47,7 @@ function isValidInstagramUrl(urlStr) {
     }
 }
 
-// Helper: Download a file stream directly to local disk using Axios (With Anti-Block Headers)
+// Helper: Download a file stream directly to local disk
 const downloadFile = async (url, destPath) => {
     const writer = fs.createWriteStream(destPath);
     const response = await axios({
@@ -57,11 +55,11 @@ const downloadFile = async (url, destPath) => {
         method: 'GET',
         responseType: 'stream',
         headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/114.0.0.0 Safari/537.36',
             'Accept': '*/*',
             'Referer': 'https://www.instagram.com/'
         },
-        timeout: 60000 // Extended timeout for downloading large Reels
+        timeout: 60000 
     });
     response.data.pipe(writer);
     return new Promise((resolve, reject) => {
@@ -70,19 +68,34 @@ const downloadFile = async (url, destPath) => {
     });
 };
 
-// FFmpeg Muxer logic for merging Instagram Video + Audio
+// NEW HELPER: Smart Audio Detection (To Preserve Real Music)
+const hasAudioStream = (videoUrl) => {
+    return new Promise((resolve) => {
+        ffmpeg.ffprobe(videoUrl, (err, metadata) => {
+            if (err) {
+                console.error("FFprobe check error:", err.message);
+                resolve(true); // Default to true so we don't accidentally ruin the real music
+            } else {
+                const hasAudio = metadata.streams.some(s => s.codec_type === 'audio');
+                resolve(hasAudio);
+            }
+        });
+    });
+};
+
+// FFmpeg Muxer
 const muxMediaLocally = (localVideo, localAudio, outputPath) => {
     return new Promise((resolve, reject) => {
         ffmpeg()
             .input(localVideo)
             .input(localAudio)
             .outputOptions([
-                '-c:v copy',             // Copy original video stream
-                '-c:a aac',              // Encode audio to universal AAC
-                '-map 0:v:0',            // Strictly map video
-                '-map 1:a:0',            // Strictly map audio
-                '-shortest',             // End encoding when shortest stream ends
-                '-movflags +faststart'   // Optimize MP4
+                '-c:v copy',             
+                '-c:a aac',              
+                '-map 0:v:0',            
+                '-map 1:a:0',            
+                '-shortest',             
+                '-movflags +faststart'   
             ])
             .on('end', () => resolve(outputPath))
             .on('error', (err) => reject(err))
@@ -90,28 +103,22 @@ const muxMediaLocally = (localVideo, localAudio, outputPath) => {
     });
 };
 
-// ==========================================
-// HEALTH ENDPOINT
-// ==========================================
+// Health Check Endpoint
 app.get('/health', (req, res) => {
     res.json({ success: true, service: "NUMU SAVER Backend is Awake" });
 });
 
-// ==========================================
-// FORCED DOWNLOAD ROUTES
-// ==========================================
+// Serve the fully processed MP4 files
 app.get('/downloads/:filename', (req, res) => {
     const filepath = path.join(TEMP_DIR, req.params.filename);
     if (fs.existsSync(filepath)) {
-        res.download(filepath, 'NUMU-SAVER-Reel.mp4', (err) => {
-            if (err) console.error("Error sending file:", err);
-        });
+        res.download(filepath, 'NUMU-SAVER-Reel.mp4');
     } else {
         res.status(404).send('Download link expired or file unavailable. Please fetch the video again.');
     }
 });
 
-// Proxy route for unified media files (Anti-Block)
+// Proxy route (Forces browser download and preserves original Real Music)
 app.get('/api/proxy', async (req, res) => {
     try {
         const videoUrl = req.query.url;
@@ -122,7 +129,7 @@ app.get('/api/proxy', async (req, res) => {
             url: videoUrl,
             responseType: 'stream',
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/114.0.0.0 Safari/537.36',
                 'Referer': 'https://www.instagram.com/'
             }
         });
@@ -143,22 +150,21 @@ app.post('/api/instagram/extract', async (req, res) => {
     try {
         const { url } = req.body;
         if (!url || !isValidInstagramUrl(url)) {
-            return res.status(400).json({ success: false, error: "Invalid Instagram URL provided. Check your link." });
+            return res.status(400).json({ success: false, error: "Invalid Instagram URL provided." });
         }
         if (!process.env.APIFY_API_TOKEN) {
-            return res.status(500).json({ success: false, error: "Backend error: APIFY_API_TOKEN is missing in Render." });
+            return res.status(500).json({ success: false, error: "Backend config error." });
         }
 
         const client = new ApifyClient({ token: process.env.APIFY_API_TOKEN });
         
-        // Fixed Apify Call (Removed restricting parameters)
         const run = await client.actor("apify/instagram-scraper").call({
             directUrls: [url]
         });
 
         const { items } = await client.dataset(run.defaultDatasetId).listItems();
         if (!items || items.length === 0) {
-            return res.status(404).json({ success: false, error: "Instagram post not found or it is a Private Account." });
+            return res.status(404).json({ success: false, error: "Post not found or is Private." });
         }
 
         const mediaData = items[0];
@@ -167,7 +173,6 @@ app.post('/api/instagram/extract', async (req, res) => {
         let videoUrl = mediaData.videoUrl || mediaData.video_url;
         let audioUrl = mediaData.audioUrl || mediaData.audio_url; 
 
-        // If direct videoUrl isn't available, search versions
         if (!videoUrl && mediaData.videoVersions && mediaData.videoVersions.length > 0) {
             const sortedVids = [...mediaData.videoVersions].sort((a, b) => (b.width || 0) - (a.width || 0));
             videoUrl = sortedVids[0].url;
@@ -177,11 +182,14 @@ app.post('/api/instagram/extract', async (req, res) => {
         }
 
         if (!videoUrl) {
-            return res.status(404).json({ success: false, error: "No video found. Make sure the URL is a Video or Reel, not a Photo." });
+            return res.status(404).json({ success: false, error: "No video found in this URL." });
         }
 
-        // MUXING LOGIC TO GUARANTEE MUSIC/AUDIO
-        if (videoUrl && audioUrl && videoUrl !== audioUrl) {
+        // SMART AUDIO CHECK: Does the main video already have the Real Music?
+        const videoHasRealMusic = await hasAudioStream(videoUrl);
+
+        if (!videoHasRealMusic && audioUrl && videoUrl !== audioUrl) {
+            // ONLY merge if video is 100% mute (Rare DASH streams)
             const fileId = crypto.randomUUID();
             const videoTemp = path.join(TEMP_DIR, `v_${fileId}.mp4`);
             const audioTemp = path.join(TEMP_DIR, `a_${fileId}.mp4`);
@@ -195,17 +203,27 @@ app.post('/api/instagram/extract', async (req, res) => {
                 if (fs.existsSync(videoTemp)) fs.unlinkSync(videoTemp);
                 if (fs.existsSync(audioTemp)) fs.unlinkSync(audioTemp);
             } catch (muxError) {
-                console.error("Critical Muxing Failure:", muxError);
+                console.error("Muxing Failure:", muxError);
                 if (fs.existsSync(videoTemp)) fs.unlinkSync(videoTemp);
                 if (fs.existsSync(audioTemp)) fs.unlinkSync(audioTemp);
-                return res.status(500).json({ success: false, error: "Failed to extract audio track. Instagram blocked the stream." });
+                return res.status(500).json({ success: false, error: "Failed to process media." });
             }
 
             deleteFileAfterDelay(outputPath, 60 * 60 * 1000); 
-            formats.push({ quality: "Original HD (Video + Music)", url: `/downloads/numu_ig_${fileId}.mp4` });
+            formats.push({ quality: "Original HD (Video + Audio)", url: `/downloads/numu_ig_${fileId}.mp4` });
         } else {
-            // Single unified file. Proxy it through backend
-            formats.push({ quality: "Original HD (Video + Music)", url: `/api/proxy?url=${encodeURIComponent(videoUrl)}` });
+            // PRESERVE REAL MUSIC: Proxy the original file directly!
+            formats.push({ quality: "Original HD (Real Music Preserved)", url: `/api/proxy?url=${encodeURIComponent(videoUrl)}` });
         }
 
-        return res.json({ s
+        return res.json({ success: true, formats });
+    } catch (error) {
+        console.error("IG Extraction error:", error.message);
+        return res.status(500).json({ success: false, error: "Extraction Failed. Try again later." });
+    }
+});
+
+// Start Server
+app.listen(port, () => {
+    console.log(`NUMU SAVER backend running on port ${port}`);
+});
