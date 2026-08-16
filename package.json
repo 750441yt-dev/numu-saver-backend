@@ -1,10 +1,13 @@
 {
   "name": "numu-saver-backend",
   "version": "1.0.0",
-  "description": "Instagram extraction API for Numu Saver",
+  "description": "NUMU SAVER Instagram extraction backend",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "apify-client": "^2.9.0",
